@@ -70,7 +70,7 @@ process_parts(_Socket,[Last]) ->
     Last;
 process_parts(Socket,[H|T]) ->
     Reply = get_reply(H),
-    ok = gen_tcp:send(Socket, <<Reply/binary,10>>),
+    gen_tcp:send(Socket, <<Reply/binary,10>>),
     process_parts(Socket,T).
 
 process_buffer(Socket, Buffer) ->
