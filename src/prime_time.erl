@@ -15,7 +15,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--define(BUFFER_SIZE_KB, 64).
+-define(MAX_BUFFER_SIZE_KB, 64).
 -define(READ_TIMEOUT_SECONDS, 10).
 
 start_link(NextStep, State) ->
@@ -66,20 +66,9 @@ get_reply(Binary) ->
 	    <<"malformed">>
     end.
 
-process_parts(_Socket,[Last]) ->
-    Last;
-process_parts(Socket,[H|T]) ->
-    Reply = get_reply(H),
-    gen_tcp:send(Socket, <<Reply/binary,10>>),
-    process_parts(Socket,T).
-
-process_buffer(Socket, Buffer) ->
-    Parts = binary:split(Buffer,<<10>>,[global]),
-    process_parts(Socket,Parts).
-
 handle_continue(listen, PortNumber) ->
     ?LOG_DEBUG("listen ~p", [PortNumber]),
-    Options = [binary, {active, false}, {reuseaddr, true}],
+    Options = [binary, {active, false}, {reuseaddr, true}, {packet, line}, {buffer, ?MAX_BUFFER_SIZE_KB * 1024}],
     case gen_tcp:listen(PortNumber, Options) of
 	{ok, ListenSocket} ->
 	    ChildSpec = child_spec(accept, {ListenSocket}, permanent),
@@ -92,7 +81,7 @@ handle_continue(accept, {ListenSocket}=S) ->
     case gen_tcp:accept(ListenSocket, 30000) of
 	{ok, Socket} ->
 	    ?LOG_DEBUG("accept"),
-	    ChildSpec = child_spec(read, {Socket, <<>>}, temporary),
+	    ChildSpec = child_spec(read, {Socket}, temporary),
 	    case supervisor:start_child(protohackers_sup, ChildSpec) of
 		{ok, Child} ->
 		    ok = gen_tcp:controlling_process(Socket, Child),
@@ -105,18 +94,13 @@ handle_continue(accept, {ListenSocket}=S) ->
         {error, Reason} ->
 	    {stop, Reason, S}
     end;
-handle_continue(read, {Socket, Buffer}) ->
+handle_continue(read, {Socket}) ->
     ?LOG_DEBUG("read"),
     case gen_tcp:recv(Socket, 0, ?READ_TIMEOUT_SECONDS * 1000) of
 	{ok, Data} ->
-	    NewBuffer = process_buffer(Socket, <<Buffer/binary,Data/binary>>),
-	    if
-		byte_size(NewBuffer) > ?BUFFER_SIZE_KB * 1024 ->
-		    ?LOG_DEBUG("buffer overflow"),
-		    {noreply, {Socket}, {continue, close}};
-		true ->
-		    {noreply, {Socket, NewBuffer}, {continue, read}}
-		end;
+	    Reply = get_reply(Data),
+	    gen_tcp:send(Socket, <<Reply/binary,10>>),
+	    {noreply, {Socket}, {continue, read}};
 	{error, closed} ->
 	    {noreply, {Socket}, {continue, close}};
 	{error, timeout} ->
