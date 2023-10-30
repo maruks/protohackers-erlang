@@ -1,22 +1,19 @@
 %%%-------------------------------------------------------------------
-%% @doc prime time gen server
+%% @doc means_to_an_end gen server
 %% @end
 %%%-------------------------------------------------------------------
 
--module(prime_time).
+-module(means_to_an_end).
 
 -behaviour(gen_server).
 
--import(jsone, [try_decode/1,encode/1]).
-
 -export([start_link/2,init/1,handle_cast/2,handle_call/3,terminate/2,handle_continue/2]).
 
--export([is_prime/1]).
+-import(gb_trees,[empty/0,insert/3,iterator_from/2,next/1]).
 
 -include_lib("kernel/include/logger.hrl").
 
--define(MAX_BUFFER_SIZE_KB, 64).
--define(READ_TIMEOUT_SECONDS, 10).
+-define(READ_TIMEOUT_SECONDS, 60).
 
 start_link(NextStep, State) ->
     gen_server:start_link(?MODULE, {NextStep, State}, []).
@@ -31,44 +28,42 @@ child_spec(NextStep, State, Restart) ->
       restart => Restart,
       type => worker}.
 
-decode(Binary) ->
-    case try_decode(Binary) of
-	{ok, #{<<"method">> := <<"isPrime">>,<<"number">> := Number}, _} when is_number(Number) ->
-	    {ok, Number};
-	_ ->
-	    {error}
+safe_avg(_Sum, 0) ->
+    0;
+safe_avg(Sum, Items) ->
+    trunc( Sum / Items).
+
+get_average(MaxTime, Iterator, Sum, Items) ->
+    case next(Iterator) of
+	{Key, Value, Iter2} ->
+	    if Key =< MaxTime ->
+		    get_average(MaxTime, Iter2, Sum + Value, Items + 1);
+	       true ->
+		    safe_avg(Sum, Items)
+	    end;
+	none ->
+	    safe_avg(Sum, Items)
     end.
 
-test_numbers(I, MaxI, _N) when I > MaxI ->
-    true;
-test_numbers(I, _MaxI, N) when N rem I =:= 0 ; N rem (I + 2) =:= 0 ->
-    false;
-test_numbers(I, MaxI, N) ->
-    test_numbers(I + 6, MaxI, N).
+query(MinTime, MaxTime, _Tree) when MinTime > MaxTime ->
+    0;
+query(MinTime, MaxTime, Tree) ->
+    get_average(MaxTime, iterator_from(MinTime, Tree), 0 , 0).
 
-is_prime(N) when is_integer(N), N > 1 ->
-    if
-	N =:= 2 orelse N =:= 3 ->
-	    true;
-	N rem 2 =:= 0 orelse N rem 3 =:= 0 ->
-	    false;
-	true -> test_numbers(5, trunc(math:sqrt(N)), N)
-    end;
-is_prime(_) ->
-    false.
-
-get_reply(Binary) ->
-    case decode(Binary) of
-	{ok, Number} ->
-	    IsPrime = is_prime(Number),
-	    encode(#{method => <<"isPrime">>, prime => IsPrime});
-	{error} ->
-	    <<"malformed">>
-    end.
+process_data(<<"I", Timestamp:32/big-signed-integer, Price:32/big-signed-integer, Rest/binary>>, Tree, Socket) ->
+    process_data(Rest, insert(Timestamp, Price, Tree), Socket);
+process_data(<<"Q", MinTime:32/big-signed-integer, MaxTime:32/big-signed-integer, Rest/binary>>, Tree, Socket) ->
+    Average = query(MinTime, MaxTime, Tree),
+    gen_tcp:send(Socket, <<Average:32/big-signed-integer>>),
+    process_data(Rest, Tree, Socket);
+process_data(<<_:72, Rest/binary>>, Tree, Socket) ->
+    process_data(Rest, Tree, Socket);
+process_data(<<Rest/binary>>, Tree, _Socket) ->
+    {Rest, Tree}.
 
 handle_continue(listen, PortNumber) ->
     ?LOG_DEBUG("listen ~p", [PortNumber]),
-    Options = [binary, {active, false}, {reuseaddr, true}, {packet, line}, {buffer, ?MAX_BUFFER_SIZE_KB * 1024}],
+    Options = [binary, {active, false}, {reuseaddr, true}],
     case gen_tcp:listen(PortNumber, Options) of
 	{ok, ListenSocket} ->
 	    ChildSpec = child_spec(accept, {ListenSocket}, permanent),
@@ -80,7 +75,7 @@ handle_continue(listen, PortNumber) ->
 handle_continue(accept, {ListenSocket}=S) ->
     case gen_tcp:accept(ListenSocket, 30000) of
 	{ok, Socket} ->
-	    ChildSpec = child_spec(read, {Socket}, temporary),
+	    ChildSpec = child_spec(read, {Socket, <<>>, empty()}, temporary),
 	    case supervisor:start_child(protohackers_sup, ChildSpec) of
 		{ok, Child} ->
 		    ok = gen_tcp:controlling_process(Socket, Child),
@@ -93,13 +88,12 @@ handle_continue(accept, {ListenSocket}=S) ->
         {error, Reason} ->
 	    {stop, Reason, S}
     end;
-handle_continue(read, {Socket}) ->
+handle_continue(read, {Socket, Buffer, Tree}) ->
     ?LOG_DEBUG("read"),
     case gen_tcp:recv(Socket, 0, ?READ_TIMEOUT_SECONDS * 1000) of
 	{ok, Data} ->
-	    Reply = get_reply(Data),
-	    gen_tcp:send(Socket, <<Reply/binary,10>>),
-	    {noreply, {Socket}, {continue, read}};
+	    {NewBuffer, NewTree} = process_data(<<Buffer/binary,Data/binary>>, Tree, Socket),
+	    {noreply, {Socket, NewBuffer, NewTree}, {continue, read}};
 	{error, closed} ->
 	    {noreply, {Socket}, {continue, close}};
 	{error, timeout} ->

@@ -29,6 +29,10 @@ init([]) ->
 		  start => {prime_time, start_link, [listen, Port + 1]},
                   restart => permanent,
 		  type => worker},
-    {ok, {SupFlags, [SmokeTest, PrimeTime]}}.
+    MeansToAndEnd = #{id => means_to_an_end,
+		      start => {means_to_an_end, start_link, [listen, Port + 2]},
+		      restart => permanent,
+		      type => worker},
+    {ok, {SupFlags, [SmokeTest, PrimeTime, MeansToAndEnd]}}.
 
 %% internal functions

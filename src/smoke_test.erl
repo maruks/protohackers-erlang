@@ -23,7 +23,7 @@ init({NextStep, State}=Args) ->
 
 child_spec(NextStep, State, Restart) ->
     #{id => make_ref(),
-      start => {smoke_test, start_link, [NextStep, State]},
+      start => {?MODULE, start_link, [NextStep, State]},
       restart => Restart,
       type => worker}.
 
@@ -41,7 +41,6 @@ handle_continue(listen, PortNumber) ->
 handle_continue(accept, {ListenSocket}=S) ->
     case gen_tcp:accept(ListenSocket, 30000) of
 	{ok, Socket} ->
-	    ?LOG_DEBUG("accept"),
 	    ChildSpec = child_spec(read, {Socket, [], 0}, temporary),
 	    case supervisor:start_child(protohackers_sup, ChildSpec) of
 		{ok, Child} ->
